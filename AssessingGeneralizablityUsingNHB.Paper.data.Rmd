@@ -1,0 +1,763 @@
+---
+title: "Assessing the Generlizatoin fo the Clusters Using Previous Cohort (NHB papaer)"
+output:
+  html_document:
+    df_print: paged
+---
+
+This is an [R Markdown](http://rmarkdown.rstudio.com) Notebook. When you execute code within the notebook, the results appear beneath the code. 
+
+When you save the notebook, an HTML file containing the code and output will be saved alongside it (click the *Preview* button or press *Cmd+Shift+K* to preview the HTML file). 
+
+The preview shows you a rendered HTML copy of the contents of the editor. Consequently, unlike *Knit*, *Preview* does not run any R code chunks. Instead, the output of the chunk when it was last run in the editor is displayed.
+
+## General Description
+Here, we're going to assess the generalizablity of the clusters that we got using the new language paradigme. To do this, I'm going to do the label propagation to do the clustering on the previous dataset that was published in Nature Human Behaviour. 
+
+CFM: And, then I can use ANOVA or some similarity measures to check the similarity of those subjects to the clusters that they assigned. 
+
+```{r setup, include=FALSE} 
+knitr::opts_chunk$set(
+	echo = FALSE,
+	message = FALSE,
+	warning = FALSE
+)
+ 
+
+```
+
+## Loading required libraries
+```{r loading libraries}
+library(ggplot2)
+library(SNFtool)
+library(dplyr)
+library(ggpubr)
+library(tidyverse)
+library(ggstatsplot)
+library(knitr)
+library(skimr)
+library(rstatix)
+library(sigclust)
+library(ggridges)
+```
+
+
+## Function Definition
+
+#### "convert.df.2.ggplot.friendly" function 
+```{r convert.df.2.ggplot.friendly function }
+################################################################################
+#Description=======
+#This function puts all columns that are not "fixed.characteristics" in a single column and adds
+#a new column to show each mesurement values belong to which measurement type.
+#(for example "diagnosis" is a fixed.characteristics or any 
+#other measures that we are not going do startify subjects based on those and are note being used in "facet")
+################################################################################
+#INPUT====
+#"df" a data frame (the first col is SubjectID), 
+#"no.of.fixed.characteristics" is the number of cols that show the clinical characteristics
+#which we want to repeat them for all Mesearements (e.g. Sex, Dxj, ....). By default these fixed.characteristics MUST be the most right cols
+################################################################################
+#OUTPUT====
+#"ggplot.friendly.df": is the converted version of the imput which is very friendly for ggplot.
+################################################################################
+#function definition========
+convert.df.2.ggplot.friendly <- function(df, no.of.fixed.characteristics)
+{
+  library(dplyr)
+  no.of.cols <- 
+    ncol(df)
+  #the final df would be 2-column df
+  #the first column shows that subjectIDs and the second one shows the measurement (e.g. clinical metrics or eye tracking feature etc.)
+  ggplot.friendly.df <- 
+    as.data.frame(matrix(ncol = 3 + no.of.fixed.characteristics, nrow = 1))
+  #the "fixed.characteristics.col.name" vctr shows the colnames for those "fixed.characteristics"
+  if (no.of.fixed.characteristics != 0 ) 
+  {
+    fixed.characteristics.col.name  <- 
+      colnames(df)[c((no.of.cols - no.of.fixed.characteristics + 1):no.of.cols)]
+    colnames(ggplot.friendly.df) <- 
+      c("SubjectID", fixed.characteristics.col.name, "MesearementValue", "Mesearement")
+  }else
+  {
+    fixed.characteristics.col.name  <- NA
+    colnames(ggplot.friendly.df) <- 
+      c("SubjectID", "MesearementValue", "Mesearement")
+  }
+ 
+  no.of.measurements <- 
+    no.of.cols - no.of.fixed.characteristics - 1 # -1==> SubjectID 
+  measuresment.name.vctr <-
+    colnames(df)[c(2:(no.of.measurements+1))]
+  for (j in c(2:(no.of.measurements+1))) 
+  {
+    #selecting the related cols
+    if (no.of.fixed.characteristics != 0 ) 
+    {
+      df.correspond.to.current.measurement <-
+        df[,c(1,c((no.of.cols - no.of.fixed.characteristics + 1):no.of.cols),j)]
+    }else
+    {
+      df.correspond.to.current.measurement <-
+        df[,c(1,j)]
+    }
+    
+    #adding measurement name as last column
+    df.correspond.to.current.measurement$Mesearement <-
+      rep(measuresment.name.vctr[j-1], 
+          nrow(df.correspond.to.current.measurement))
+    colnames(df.correspond.to.current.measurement) <- 
+      colnames(ggplot.friendly.df)
+    ggplot.friendly.df <- 
+      rbind(ggplot.friendly.df , df.correspond.to.current.measurement)
+  }
+  
+  #remoding the first NA row 
+  ggplot.friendly.df <-
+    ggplot.friendly.df[-1,]
+ return(ggplot.friendly.df)
+}
+
+
+```
+
+
+
+
+
+#### "SNF_Louvain" function
+```{r SNF_Louvain}
+#I got the below code from Yaqoing 
+# SNF_Louvain.R
+#I changed the output to be simpler and the function just returens the clustering but not the matrix 
+# 1) Perform similarity fusion network analysis with 6 ROI variables (temporal ROI 
+# activation from three language paradigms) and 14 clinical variables; 
+# 2) Run Louvain clustering analysis with the similarity network (strongest 15% 
+# connecting partners of each subject) 
+SNF_Louvain.Simple.Output <- function(dat, ROI_var, clinic_var) {
+  
+  # normalization variables for each data type
+  ROI_dat <- standardNormalization(dat[,ROI_var])
+  clinc_data <- standardNormalization(dat[,clinic_var])
+  
+  # pair-wise distance
+  DistROIs = (dist2(as.matrix(ROI_dat),as.matrix(ROI_dat)))^(1/2)
+  DistClinic = (dist2(as.matrix(clinc_data),as.matrix(clinc_data)))^(1/2)
+  
+  # add row and column names
+  rownames(DistROIs) <- dat$subj
+  rownames(DistClinic) <- dat$subj
+  
+  colnames(DistROIs) <- dat$subj
+  colnames(DistClinic) <- dat$subj
+  
+  # similarity graphs
+  WROIs <- affinityMatrix(DistROIs, K = 20, sigma = 0.5)
+  WClinic <- affinityMatrix(DistClinic, K = 20, sigma = 0.5)
+  
+  # fuse/merge two matricies into one similarity network
+  W = SNF(list(WROIs, WClinic), 20, 20)
+  
+  # visualization
+  dat$index[dat$Dx == "ASD"] <- 1
+  dat$index[dat$Dx == "ASDFeat"] <- 2
+  dat$index[dat$Dx == "DD/Other"] <- 3
+  dat$index[dat$Dx == "LD"] <- 4
+  dat$index[dat$Dx == "TD"] <- 5
+  
+  fviz_cluster(object = list(data = W, cluster = dat$index), geom = "point",
+               ellipse = FALSE, show.clust.cent = FALSE, shape = 19,
+               pointsize = 3, ellipse.type = "norm", ggtheme = theme_void())
+  
+  # reorganize similarity network
+  ind <- which(lower.tri(W,diag=FALSE) , arr.ind = TRUE)
+  
+  snf_matrix <- as.data.frame(ind)
+  for (x in 1:dim(ind)[1]) {
+    snf_matrix[x, 3:5] <- cbind(colnames(W)[ind[x, "col"]],
+                                colnames(W)[ind[x, "row"]],
+                                round(W[colnames(W)[ind[x, "col"]],
+                                        colnames(W)[ind[x, "row"]]],5))
+  }
+  colnames(snf_matrix)[3:5] <- c("Source", "Target", "Weight")
+  snf_matrix$name <- paste(as.character(snf_matrix$Source), 
+                           as.character(snf_matrix$Target), sep = ".")
+  
+  # threshold the similarity network
+  snf_matrix_thr <- as.data.frame(matrix(0, 0, 6))
+  for (i in 1:dim(W)[1]) {
+    tmp_weight <- snf_matrix[snf_matrix$col == i, ]
+    top <- tmp_weight[as.numeric(tmp_weight$Weight) > quantile(as.numeric(tmp_weight$Weight), prob = 1 - 15/100),]
+    snf_matrix_thr <- rbind(top, snf_matrix_thr)
+  }
+  
+  dim(snf_matrix_thr)
+  
+  # thresholded matrix
+  
+  matrix_thr <- as.data.frame(matrix(0, nrow(dat), nrow(dat)))
+  rownames(matrix_thr) <- dat$subj
+  colnames(matrix_thr) <- dat$subj
+  
+  for (i in seq_along(snf_matrix_thr$Source)) {
+    matrix_thr[snf_matrix_thr$Source[i], snf_matrix_thr$Target[i]] <- 
+      as.numeric(snf_matrix_thr$Weight[i])
+  }
+  
+  #browser()
+  # Louvain clustering analysis
+  gg <- as.matrix(matrix_thr)
+  G1 <- graph_from_adjacency_matrix(gg, mode = "undirected", weighted = TRUE, 
+                                    diag = FALSE)
+  
+  clusterlouvain <- igraph::cluster_louvain(G1)
+  nclust <- max(clusterlouvain$membership)
+  
+  print(paste0("There are ",  nclust, " clusters")) 
+  
+  # clustering results
+  W_Clustering_thr <- as.data.frame(matrix(0, dim(W)[1], 3))
+  colnames(W_Clustering_thr) <- c("subj", "Clustering", "group")
+  
+  W_Clustering_thr$Clustering <- clusterlouvain$membership
+  W_Clustering_thr$subj <- dat$subj
+  W_Clustering_thr$group <- dat$group
+  #browser()
+  
+  return(W_Clustering_thr)
+}
+```
+
+#### "SNF.Cluster.Assignment.4NewData" function
+```{r SNF.Cluster.Assignment.4NewData}
+################################################################################
+#Description=======
+#This function assigns cluster labels to new subjects based on a training data using two different methods: local and global consistency, and label propagation . To do this, it calls the "groupPredict" which was implemendet in the "SNFtool" package.
+################################################################################
+#INPUT====
+#"train": a list of views for training subjects
+#"train.SubjectIDs": a vector of the Subject IDs for the training dataset (to be assigned to the row names of the output dataframe for more readablity)
+#"groups": cluster labels of the training data
+#"newdata": a list of the same views for new subjects
+#"newdata.SubjectIDs": a vector of the Subject IDs for the new dataset (to be assigned to the row names of the output dataframe for more readablity)
+################################################################################
+#OUTPUT====
+#"predicted.clusters": a dtaframe with three columns. The first column is SubjectID. The next two columns show the predicted labels for the new data. The thirs column just simply show which subjects are new and which were used for training
+################################################################################
+#NOTE====
+#the first elements in the "predicted.clusters" are the labels of the traing data and the predicted labels for the new data are the very last elements in each columns. 
+################################################################################
+#function definition========
+SNF.Cluster.Assignment.4NewData <- 
+  function(train, train.SubjectIDs, 
+           newdata, newdata.SubjectIDs,
+           groups)
+{
+    
+  # Set the parameters
+  K = 20
+  alpha = 0.5
+  t = 20
+  no.of.training.subjects <-
+    length(train.SubjectIDs)
+  no.of.new.subjects <- 
+    length(newdata.SubjectIDs)
+  if ((nrow(train[[1]])!= no.of.training.subjects)|
+      (nrow(newdata[[1]])!= no.of.new.subjects)) 
+  {
+    warning("Number of train/newdata subject IDs is not consistent with the number of data")
+    return()
+  }
+    
+  # method	
+  # An indicator of which method to use to predict the label. method = 0 means to use local and global consistency; method = 1 means to use label propagation.
+  method = TRUE
+  #Apply the prediction function to the data
+  #length of the "newcluster.index.vctr.from.SNF.done.on.WholeData" is equal the number of training data
+  #the first "no.of.train.samples" elements of this vector and the rest shows the predicted clusters for the test data
+  newcluster.index.vctr.from.SNF.done.on.WholeData.Label_propagation = groupPredict(train,newdata,groups,K,alpha,t,method)
+  #predicting the cluster labels using local and global consistency method "!method"
+  newcluster.index.vctr.from.SNF.done.on.WholeData.local_global_consistency = groupPredict(train,newdata,groups,K,alpha,t,!method)
+  #final result: a dataframe of two predicted label vectors using the two methods
+  predicted.clusters = cbind(Label_propagation.ClusterLabels = newcluster.index.vctr.from.SNF.done.on.WholeData.Label_propagation, 
+             local_global_consistency.ClusterLabels = newcluster.index.vctr.from.SNF.done.on.WholeData.local_global_consistency)
+  predicted.clusters <- 
+    as.data.frame(predicted.clusters)
+  #assigning the Subject IDs to the row name
+  predicted.clusters$SubjectID <-
+    c(train.SubjectIDs, newdata.SubjectIDs)
+  #adding another column to show which subjects are train and whoch are new data
+  train.OR.new.label.vctr <-
+    c(rep("Train", no.of.training.subjects), 
+      rep("New", no.of.new.subjects))
+ predicted.clusters$train.OR.new <- 
+    train.OR.new.label.vctr
+  return(predicted.clusters)
+}
+
+```
+
+
+
+### Data preprocessing
+
+#### Reading the data
+```{r reading the data}
+#the subjects and related data that Yaqoimng was used in NHB paper
+NHB.cohort.data <-
+  read.csv("./Data/ROI_results_final.Liz_Lang_NHB.txt", sep = "\t")
+dim(NHB.cohort.data)
+kable(NHB.cohort.data[c(1:10),])
+str(NHB.cohort.data)
+skim(NHB.cohort.data)
+no.of.new.subjects <- 
+  nrow(NHB.cohort.data)
+```
+
+
+#### Prepairing the data for SNF
+##### Prepairing the training data for SNF
+```{r Prepairing the data for SNF}
+#loading list of the layers for the training data (the data tha Yaqoing was used for the 176 subjects)
+load(file = "./Result/yaqoing.data.TwoMainLayers.list")
+#reading the subjects details, including SNF cluster labels, for the training data (the data that Yaqoing was used for the 176 subjects)
+  
+yaqoing.input.data <- 
+  read.csv("./Data/datafile_clusters.OriginalFile.csv")
+#Yaqoing was used these columns as the two views (two layers)
+#These variables have been used in the originial SNF 
+#1- four 
+  #fMRI features: "LHfrontal"  "RHfrontal"  "LHtemporal" "RHtemporal"
+#2- Six clinical measures: 
+  # [1] "final_ados_CoSoTot"          "final_ados_RRTot"           
+  # [3] "final_vine_AdapBehav_DomStd" "final_mullen_RLT"           
+  # [5] "final_mullen_ELT"            "final_mullen_ELC_Std"       
+
+#fMRI activation features' name
+ROI_var <- 
+  colnames(yaqoing.input.data)[c(5:8)]
+#clinical features' name
+clinic_var <- 
+  colnames(yaqoing.input.data)[c(9:14)]
+train.SubjectIDs <- 
+  yaqoing.input.data$subj
+#checking the consistency of the column names between new data (cohort that was used in the NHB paper) and training data
+ROI_var %in% colnames(NHB.cohort.data)
+clinic_var %in% colnames(NHB.cohort.data)
+
+#Constructing the list of two views for the training data
+#fMRI activation features
+ROI.df.Train = yaqoing.input.data[,ROI_var]
+#assigning row names 
+rownames(ROI.df.Train) <- train.SubjectIDs
+#clinical features
+Clin.df.Train = yaqoing.input.data[,clinic_var]
+#assigning row names 
+rownames(Clin.df.Train) <- train.SubjectIDs
+
+TwoMainLayers.Train.list <- 
+  list(ROI.df = ROI.df.Train, 
+       Clin.df = Clin.df.Train)
+#Extracting the cluster labels for the training data
+cluster.index.vctr.4.trainingSubjects <- 
+  yaqoing.input.data$Clustering
+no.of.training.subjects <- 
+  nrow(yaqoing.input.data)
+```
+
+##### Prepairing the training data for SNF
+```{r}
+#Constructing the list of two views for the new data
+newdata.SubjectIDs <- 
+  NHB.cohort.data$subjid
+#fMRI activation features
+ROI.df.NHB = NHB.cohort.data[,ROI_var]
+#assigning row names (using "fMRI_subjid", beacuse "subjid" contains repetetive IDs)
+rownames(ROI.df.NHB) <- NHB.cohort.data$fMRI_subjid
+#clinical features
+Clin.df.NHB = NHB.cohort.data[,clinic_var]
+#assigning row names (using "fMRI_subjid", beacuse "subjid" contains repetetive IDs)
+rownames(Clin.df.NHB) <- NHB.cohort.data$fMRI_subjid
+TwoMainLayers.NewData.list <- 
+  list(ROI.df = ROI.df.NHB, 
+       Clin.df = Clin.df.NHB)
+kable(x = TwoMainLayers.Train.list$ROI.df[c(1:10),], caption = "ROI Training Data")
+kable(x = TwoMainLayers.Train.list$Clin.df[c(1:10),], caption = "Two Main Clininal Training Data")
+
+kable(x = head(TwoMainLayers.NewData.list$ROI.df[c(1:10),]), caption = "ROI Layer New Data (NHB)")
+kable(x = head(TwoMainLayers.NewData.list$Clin.df[c(1:10),]), caption = "Clininal Layer New Data (NHB)")
+
+```
+
+
+
+### Assigning labels to the new subjects
+```{r Assigning labels to the new subjects using two methods}
+cluster.prediction.4.newdata.df <-
+  SNF.Cluster.Assignment.4NewData(train = TwoMainLayers.Train.list, 
+                                  train.SubjectIDs = train.SubjectIDs,
+                                newdata = TwoMainLayers.NewData.list, 
+                                newdata.SubjectIDs = newdata.SubjectIDs,
+                                groups = cluster.index.vctr.4.trainingSubjects)
+
+#because there are some subjects with 2 occurrences in the NHB cohort, but with different fMRI subject IDs. I'm going to add a new column to have fMRI subjectIDs for the NHB cohort subjects.
+cluster.prediction.4.newdata.df$UniqueSubjectID <-
+  c(train.SubjectIDs, NHB.cohort.data$fMRI_subjid)
+#pickling the result
+ save(cluster.prediction.4.newdata.df, file = "./Result/cluster.prediction.4.newdata.df") 
+ 
+ 
+```
+
+Checking the consistency of the cluster labels for the subjects that were NHB cohort more than one times. 
+```{r Checking the consistency of the cluster labels for the subjects that were NHB cohort more than one times}
+Subject.freq <-
+  cluster.prediction.4.newdata.df %>%
+    count(SubjectID)
+
+kable(x = cluster.prediction.4.newdata.df %>%
+  filter(SubjectID %in% Subject.freq$SubjectID[(Subject.freq$n>1)] ), caption = "Cluster predictoin for the subjects with two occurrences")
+```
+
+## assessing the cluster assignment of the new subjects 
+
+
+### Idea1 SigClust (Done!):
+Use SigClust to assess the stat. sig. of the NHB obtained clusters
+
+#### Fusing layers for the new data
+```{r Fusing layers for the new data}
+
+# pair-wise distance
+DistROIs.Newdata <- (dist2(as.matrix(TwoMainLayers.NewData.list$ROI.df),as.matrix(TwoMainLayers.NewData.list$ROI.df)))^(1/2)
+
+DistClin.Newdata <- (dist2(as.matrix(TwoMainLayers.NewData.list$Clin.df),as.matrix(TwoMainLayers.NewData.list$Clin.df)))^(1/2)
+
+# Pationt Similarity Networks
+PSN.ROIs.NewData <- 
+  affinityMatrix(DistROIs.Newdata, K = 20, sigma = 0.5)
+PSN.Clinic.NewData <- 
+  affinityMatrix(DistClin.Newdata, K = 20, sigma = 0.5)
+  
+# Fusing PSNs
+Fused.PSNs.NewData = SNF(list(PSN.ROIs.NewData, PSN.Clinic.NewData), 20, 20)
+
+```
+
+```{r SigClust}
+table(cluster.prediction.4.newdata.df$train.OR.new)
+#extracting the predicted cluster labels for the NHB data (new data)
+Label_propagation.ClusterLabels.4.Newdata <- 
+  cluster.prediction.4.newdata.df %>%
+    filter(train.OR.new == "New") %>%
+      select(Label_propagation.ClusterLabels)
+
+table(Label_propagation.ClusterLabels.4.Newdata)
+table(cluster.index.vctr.4.trainingSubjects)
+
+# pvalue.SigClust.4.trainingSubjects <- 
+#   sigclust(Fused.PSNs.NewData, nsim=1000, nrep=10, labflag=1,icovest=icovest, label = Label_propagation.ClusterLabels.4.Newdata)
+# pdf("./Viz/pvalue.SigClust.4.trainingSubjects.pdf")
+# plot(pvalue.SigClust.4.trainingSubjects)
+# dev.off()
+include_graphics(path = "./Viz/pvalue.SigClust.4.trainingSubjects.png")
+```
+
+
+
+### Idea2 (Done!):
+Assessing the difference between the NHB obtained clusters using ANOVA tests.
+#### Idea2.1 iSNF:
+```{r Preparing the data}
+table(cluster.prediction.4.newdata.df$train.OR.new)
+#Adding other clinical measures to the "cluster.prediction.4.newdata.df" to do the ANOVA
+#the pheno data for the NHB cohort (new data)
+dim(NHB.cohort.data)
+colnames(NHB.cohort.data)
+skim(NHB.cohort.data)
+#features that was used for constructing the PSNs (iSNF)
+
+iSNF.measures <- 
+  c(ROI_var, clinic_var)
+#Selecting the related columns to pass to the "convert.df.2.ggplot.friendly" function
+NHB.cohort.data.iSFN <- 
+  NHB.cohort.data %>%
+    select(c("fMRI_subjid",all_of(iSNF.measures), "gender", "recent_Dx"))
+NHB.cohort.data.iSFN.Ready4ggplot <-
+  convert.df.2.ggplot.friendly(df = NHB.cohort.data.iSFN, no.of.fixed.characteristics = 2)
+#View(NHB.cohort.data.iSFN.Ready4ggplot)
+#sanity check (checking the consitency of the ggplot ready df with the original df)
+kable(NHB.cohort.data.iSFN.Ready4ggplot[which(NHB.cohort.data.iSFN.Ready4ggplot$SubjectID == "U9K6L_01"),]
+)
+kable(NHB.cohort.data[which(NHB.cohort.data$fMRI_subjid == "U9K6L_01"),]
+)
+
+#merging with the cluster.prediction.4.newdata.df to have "Cluster Labels"
+NHB.cohort.data.iSFN.Ready4ggplot.HaveClusterLabels <- 
+  merge(x = NHB.cohort.data.iSFN.Ready4ggplot, 
+      y = cluster.prediction.4.newdata.df, 
+      by.x = "SubjectID", by.y = "UniqueSubjectID")
+
+```
+
+```{r iSNF_grouped_ggbetweenstats,fig.height = 15, fig.width = 20 }
+#doing ANOVA 
+# pdf("./Viz/NHB.cohort.data.iSFN.Ready4ggplot.HaveClusterLabels.grouped_ggbetweenstats.Cluster4Removed.pdf", height = 15, width = 25)
+NHB.cohort.data.iSFN.Ready4ggplot.HaveClusterLabels %>%
+  filter(Label_propagation.ClusterLabels!=4) %>% #Cluster4 has just one subject
+  grouped_ggbetweenstats(
+    x = Label_propagation.ClusterLabels, 
+    y = MesearementValue, 
+    fill = Label_propagation.ClusterLabels, p.adjust.method = "BH",
+    grouping.var = Mesearement, 
+    type = "np", xlab = "Group")
+#dev.off()
+```
+
+```{r iSNF_ggplot_facet,fig.height = 15, fig.width = 20 }
+# pdf("./Viz/NHB.cohort.data.iSFN.Ready4ggplot.HaveClusterLabels.ggplot.Cluster4Removed.pdf", height = 15, width = 15)
+
+NHB.cohort.data.iSFN.Ready4ggplot.HaveClusterLabels %>%
+  filter(Label_propagation.ClusterLabels != 4) %>% #Cluster4 has just one subject
+    ggplot(aes(x = Label_propagation.ClusterLabels, y = MesearementValue, fill =  factor(Label_propagation.ClusterLabels) )) + 
+    geom_boxplot(outlier.shape = NA)  + 
+    stat_summary(fun.y=mean,shape=20, col='red', geom='point', position = position_dodge(width = .75)) +
+    facet_wrap(.~ Mesearement , scales="free_y")+ 
+    theme_bw() +
+    theme(panel.spacing.x = unit(.75, "cm")) +
+    theme(panel.spacing.y = unit(.25, "cm"))+
+    theme(strip.background = element_rect(fill="dodgerblue", size=1))+ 
+    theme(
+      panel.grid.major.y = element_line(color = "black", size = 0.2)) + 
+    theme(
+      panel.grid.minor.y = element_line(color = "white", size = 0)) + 
+    theme(
+        panel.grid.major.x = element_blank()) + 
+    theme(
+      panel.grid.minor.x  = element_blank())
+#dev.off()
+```
+
+#### Idea2.2 xSNF:
+```{r}
+#columns 22-34(last column) of the NHB.cohort.data contain the different clinical measurements
+#Extracting the xSNF (those clinical measures that were not used in  constructing the PSNs and therfore were not included in the SNF)
+xSNF.measures <- 
+  setdiff(x = colnames(NHB.cohort.data)[c(21:ncol(NHB.cohort.data))], y = iSNF.measures)
+print(xSNF.measures)
+#exlcunding the "final_ados_CoSoTotRRTot"
+xSNF.measures <- 
+  setdiff(x =xSNF.measures, y = "final_ados_CoSoTotRRTot")
+#Selecting the related columns to pass to the "convert.df.2.ggplot.friendly" function
+NHB.cohort.data.xSFN <- 
+  NHB.cohort.data %>%
+    select(c("fMRI_subjid",all_of(xSNF.measures), "gender", "recent_Dx"))
+NHB.cohort.data.xSFN.Ready4ggplot <-
+  convert.df.2.ggplot.friendly(df = NHB.cohort.data.xSFN, no.of.fixed.characteristics = 2)
+#View(NHB.cohort.data.xSFN.Ready4ggplot)
+#sanity check (checking the consitency of the ggplot ready df with the original df)
+kable(NHB.cohort.data.xSFN.Ready4ggplot[which(NHB.cohort.data.xSFN.Ready4ggplot$SubjectID == "U9K6L_01"),]
+)
+kable(NHB.cohort.data[which(NHB.cohort.data$fMRI_subjid == "U9K6L_01"),]
+)
+#done!
+#merging with the cluster.prediction.4.newdata.df to have "Cluster Labels"
+NHB.cohort.data.xSFN.Ready4ggplot.HaveClusterLabels <- 
+  merge(x = NHB.cohort.data.xSFN.Ready4ggplot, 
+      y = cluster.prediction.4.newdata.df, 
+      by.x = "SubjectID", by.y = "UniqueSubjectID")
+```
+
+
+```{r xSNF_grouped_ggbetweenstats,fig.height = 15, fig.width = 20 }
+#doing ANOVA 
+# pdf("./Viz/NHB.cohort.data.xSFN.Ready4ggplot.HaveClusterLabels.grouped_ggbetweenstats.Cluster4Removed.pdf", height = 15, width = 25)
+NHB.cohort.data.xSFN.Ready4ggplot.HaveClusterLabels %>%
+  filter(Label_propagation.ClusterLabels!=4) %>% #Cluster4 has just one subject
+  grouped_ggbetweenstats(
+    x = Label_propagation.ClusterLabels, 
+    y = MesearementValue, 
+    fill = Label_propagation.ClusterLabels, p.adjust.method = "BH",
+    grouping.var = Mesearement, 
+    type = "np", xlab = "Group")
+#dev.off()
+```
+
+```{r xSNF_ggplot_facet,fig.height = 15, fig.width = 20 }
+# pdf("./Viz/NHB.cohort.data.xSFN.Ready4ggplot.HaveClusterLabels.ggplot.Cluster4Removed.pdf", height = 15, width = 15)
+
+NHB.cohort.data.xSFN.Ready4ggplot.HaveClusterLabels %>%
+  filter(Label_propagation.ClusterLabels!=4) %>% #Cluster4 has just one subject
+    ggplot(aes(x = Label_propagation.ClusterLabels, y = MesearementValue, fill =  factor(Label_propagation.ClusterLabels) )) + 
+    geom_boxplot(outlier.shape = NA)  + 
+    stat_summary(fun.y=mean,shape=20, col='red', geom='point', position = position_dodge(width = .75)) +
+    facet_wrap(.~ Mesearement , scales="free_y")+ 
+    theme_bw() +
+    theme(panel.spacing.x = unit(.75, "cm")) +
+    theme(panel.spacing.y = unit(.25, "cm"))+
+    theme(strip.background = element_rect(fill="dodgerblue", size=1))+ 
+    theme(
+      panel.grid.major.y = element_line(color = "black", size = 0.2)) + 
+    theme(
+      panel.grid.minor.y = element_line(color = "white", size = 0)) + 
+    theme(
+        panel.grid.major.x = element_blank()) + 
+    theme(
+      panel.grid.minor.x  = element_blank())
+#dev.off()
+```
+
+
+```{r get_summary_stats kable}
+kable(NHB.cohort.data.xSFN.Ready4ggplot.HaveClusterLabels %>%
+  filter(Label_propagation.ClusterLabels!=4) %>%
+  group_by(Mesearement, Label_propagation.ClusterLabels) %>%
+  get_summary_stats(MesearementValue, type =c("full"))
+)
+
+```
+
+### Idea3: Asess the difference in subject-subject distance intracluster vs. intercluster 
+
+```{r calculate the distance between all subjects (Train+NHB)}
+#Merging the two data
+TwoMainLayers.Train.and.NewData.list <-
+    list(ROI.df = rbind(TwoMainLayers.Train.list$ROI.df, TwoMainLayers.NewData.list$ROI.df), 
+       Clin.df = rbind(TwoMainLayers.Train.list$Clin.df, TwoMainLayers.NewData.list$Clin.df))
+# normalization variables for each data type
+Train.and.NewData.ROI.df.std.nrm <- 
+  standardNormalization(TwoMainLayers.Train.and.NewData.list$ROI.df)
+Train.and.NewData.Clin.df.std.nrm <- 
+  standardNormalization(TwoMainLayers.Train.and.NewData.list$Clin.df)
+  
+# Computing the pair-wise distance for all data (Train+NHB(Newdata))
+DistROIs.Train.and.NewData<- (dist2(as.matrix(Train.and.NewData.ROI.df.std.nrm),as.matrix(Train.and.NewData.ROI.df.std.nrm)))^(1/2)
+DistClin.Train.and.NewData <- (dist2(as.matrix(Train.and.NewData.Clin.df.std.nrm),as.matrix(Train.and.NewData.Clin.df.std.nrm)))^(1/2)
+#View(DistROIs.Train.and.NewData.ROI)
+```
+
+calculating the diffrence in similarity between 
+###### cluster 1
+```{r calculating the diffrence in subject-subject distance intracluster vs. intercluster for cluster 1}
+#View(DistROIs.Train.and.NewData)
+#extracting the subject-subject distance values for intrera-cluster (for cluster1)=====
+
+##ROI
+DistROIs.Train.and.NewData.Subset4NewData <- 
+  DistROIs.Train.and.NewData[
+    rownames(DistROIs.Train.and.NewData)%in% NHB.cohort.data$fMRI_subjid,
+    colnames(DistROIs.Train.and.NewData)%in% NHB.cohort.data$fMRI_subjid
+    ]
+#dim(DistROIs.Train.and.NewData.Subset4NewData)#60 60
+
+##Clinical
+DistClin.Train.and.NewData.Subset.NewData <- 
+  DistClin.Train.and.NewData[
+    rownames(DistClin.Train.and.NewData)%in% NHB.cohort.data$fMRI_subjid,
+    colnames(DistClin.Train.and.NewData)%in% NHB.cohort.data$fMRI_subjid
+    ]
+#dim(DistClin.Train.and.NewData.Subset.NewData)#60 60
+
+#checking the clusters' size 
+print("size of the obtained cluster for the NHB (60 subjects) using label propagation:")
+cluster.prediction.4.newdata.df%>%
+  filter(UniqueSubjectID%in%NHB.cohort.data$fMRI_subjid)%>%
+  select(Label_propagation.ClusterLabels) %>%
+    table()
+
+#extracting the cluster1 subjects
+cluster1.fMRISubjectID <- 
+  cluster.prediction.4.newdata.df%>%
+    filter(UniqueSubjectID%in%NHB.cohort.data$fMRI_subjid)%>%
+      filter(Label_propagation.ClusterLabels==1)%>%
+        select(UniqueSubjectID)
+ #dim(cluster1.fMRISubjectID) #16  1
+ 
+#sanity check 
+# sum(colnames(DistClin.Train.and.NewData.Subset.NewData) == rownames(DistClin.Train.and.NewData.Subset.NewData)
+# )==ncol(DistClin.Train.and.NewData.Subset.NewData)
+ 
+#subject-subject distance values for intrera-cluster
+DistClin.Train.and.NewData.SubsetCluster1NewData <- DistClin.Train.and.NewData.Subset.NewData[cluster1.fMRISubjectID$UniqueSubjectID, cluster1.fMRISubjectID$UniqueSubjectID]
+#dim(DistClin.Train.and.NewData.SubsetCluster1NewData)
+
+#We just need to the lower triangle of this matrix
+indx.mtrix.4.lower.tri <-
+  lower.tri(x = DistClin.Train.and.NewData.SubsetCluster1NewData, diag = FALSE)
+Cluster1NewDataDistance.vctr <-
+  DistClin.Train.and.NewData.SubsetCluster1NewData[indx.mtrix.4.lower.tri]
+#sanity check
+#length(Cluster1NewDataDistance.vctr)
+
+#making a dataframe with two columns
+Dist4Cluste1.1 <- 
+  cbind(Distance = Cluster1NewDataDistance.vctr, TypeofDistMeasure = rep("Clustre1Cluster1", length(Cluster1NewDataDistance.vctr)))
+
+
+##subject-subject distance values for intre-cluster=======
+#subject ID for other clusters (not cluster1)
+indx.4.otherclustersExceptCluster1 <-
+  !(rownames(DistClin.Train.and.NewData.Subset.NewData) %in% cluster1.fMRISubjectID$UniqueSubjectID)
+#length(indx.4.otherclustersExceptCluster1)
+#sum(indx.4.otherclustersExceptCluster1)
+
+#extracting subject-subject distance values for intre-cluster
+DistClin.Train.and.NewData.SubsetCluster1.compare.to.OtherClusters <- DistClin.Train.and.NewData.Subset.NewData[cluster1.fMRISubjectID$UniqueSubjectID, indx.4.otherclustersExceptCluster1]
+
+#dim(DistClin.Train.and.NewData.SubsetCluster1.compare.to.OtherClusters)
+#View(DistClin.Train.and.NewData.SubsetCluster1.compare.to.OtherClusters)
+#class(DistClin.Train.and.NewData.SubsetCluster1.compare.to.OtherClusters)
+DistClin.Train.and.NewData.SubsetCluster1.compare.to.OtherClusters.vctr <- 
+  as.vector(DistClin.Train.and.NewData.SubsetCluster1.compare.to.OtherClusters)
+
+#making a dataframe with two columns
+Dist4Cluste1.Other <- 
+  cbind(Distance = DistClin.Train.and.NewData.SubsetCluster1.compare.to.OtherClusters.vctr, TypeofDistMeasure = rep("Clustre1Other", length(DistClin.Train.and.NewData.SubsetCluster1.compare.to.OtherClusters.vctr)))
+
+#concatenating inter and intera sbj-sbj distenace for the viz.
+DistClin4Cluste1.All <-
+  rbind(Dist4Cluste1.Other, Dist4Cluste1.1)
+#View(Dist4Cluste1.All)
+#sanity ckeck
+DistClin4Cluste1.All <- 
+  as.data.frame(DistClin4Cluste1.All)
+#dim(DistClin4Cluste1.All)
+#table(DistClin4Cluste1.All$TypeofDistMeasure)
+
+#str(DistClin4Cluste1.All)
+DistClin4Cluste1.All$Distance <- 
+  as.numeric(DistClin4Cluste1.All$Distance)
+```
+
+Comparison of the subject-subject distance based on clinical measures. 
+Cluster1-Cluster1 vs Cluster1-Rest
+
+Density plot
+
+```{r density plot}
+DistClin4Cluste1.All %>%
+  ggplot(aes(x = Distance , y = TypeofDistMeasure, fill = TypeofDistMeasure))+ geom_density_ridges() +
+  theme_ridges()
+```
+
+
+Violin + stat
+```{r }
+DistClin4Cluste1.All %>%
+  ggstatsplot::ggbetweenstats(y = Distance , x = TypeofDistMeasure, fill = TypeofDistMeasure)
+
+```
+
+
+
+
+
+### Idea4:
+Doing SNF on the NHB and assess the similarity between obtained clusters and original clustering
+
+
+### Idea5:
+Doing SNF on NHB+Train and assess the similarity between obtained clusters and original clustering
+
+
+
